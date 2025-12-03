@@ -4,8 +4,8 @@ import (
 	"sync"
 
 	"github.com/elastic/go-elasticsearch/v8"
+	"github.com/go-lynx/lynx-elasticsearch/conf"
 	"github.com/go-lynx/lynx/plugins"
-	"github.com/go-lynx/lynx/plugins/nosql/elasticsearch/conf"
 )
 
 // PlugElasticsearch represents an Elasticsearch plugin instance

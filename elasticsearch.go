@@ -6,12 +6,12 @@ import (
 	"io"
 	"time"
 
-	"github.com/go-lynx/lynx/app/log"
+	"github.com/go-lynx/lynx/log"
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/go-kratos/kratos/v2/config"
+	"github.com/go-lynx/lynx-elasticsearch/conf"
 	"github.com/go-lynx/lynx/plugins"
-	"github.com/go-lynx/lynx/plugins/nosql/elasticsearch/conf"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 

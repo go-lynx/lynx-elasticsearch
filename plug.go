@@ -2,8 +2,8 @@ package elasticsearch
 
 import (
 	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/go-lynx/lynx/app"
-	"github.com/go-lynx/lynx/app/factory"
+	"github.com/go-lynx/lynx"
+	"github.com/go-lynx/lynx/pkg/factory"
 	"github.com/go-lynx/lynx/plugins"
 )
 
@@ -24,7 +24,7 @@ func init() {
 // It gets the plugin manager through the global Lynx application instance, then gets the corresponding plugin instance by plugin name,
 // finally converts the plugin instance to *PlugElasticsearch type and returns its client field, which is the Elasticsearch client.
 func GetElasticsearch() *elasticsearch.Client {
-	plugin := app.Lynx().GetPluginManager().GetPlugin(pluginName)
+	plugin := lynx.Lynx().GetPluginManager().GetPlugin(pluginName)
 	if plugin == nil {
 		return nil
 	}
@@ -33,7 +33,7 @@ func GetElasticsearch() *elasticsearch.Client {
 
 // GetElasticsearchPlugin gets the Elasticsearch plugin instance
 func GetElasticsearchPlugin() *PlugElasticsearch {
-	plugin := app.Lynx().GetPluginManager().GetPlugin(pluginName)
+	plugin := lynx.Lynx().GetPluginManager().GetPlugin(pluginName)
 	if plugin == nil {
 		return nil
 	}

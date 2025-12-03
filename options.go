@@ -3,7 +3,7 @@ package elasticsearch
 import (
 	"time"
 
-	"github.com/go-lynx/lynx/plugins/nosql/elasticsearch/conf"
+	"github.com/go-lynx/lynx-elasticsearch/conf"
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
