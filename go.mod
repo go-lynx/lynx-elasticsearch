@@ -7,7 +7,7 @@ toolchain go1.25.3
 require (
 	github.com/elastic/go-elasticsearch/v8 v8.12.0
 	github.com/go-kratos/kratos/v2 v2.9.1
-	github.com/go-lynx/lynx v1.5.2
+	github.com/go-lynx/lynx v1.5.3
 	google.golang.org/protobuf v1.36.10
 )
 
