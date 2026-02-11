@@ -24,18 +24,34 @@ func init() {
 // It gets the plugin manager through the global Lynx application instance, then gets the corresponding plugin instance by plugin name,
 // finally converts the plugin instance to *PlugElasticsearch type and returns its client field, which is the Elasticsearch client.
 func GetElasticsearch() *elasticsearch.Client {
-	plugin := lynx.Lynx().GetPluginManager().GetPlugin(pluginName)
+	plugin := GetElasticsearchPlugin()
 	if plugin == nil {
 		return nil
 	}
-	return plugin.(*PlugElasticsearch).GetClient()
+	return plugin.GetClient()
 }
 
-// GetElasticsearchPlugin gets the Elasticsearch plugin instance
+// GetElasticsearchPlugin gets the Elasticsearch plugin instance.
+// Returns nil if the plugin is not loaded or type assertion fails.
 func GetElasticsearchPlugin() *PlugElasticsearch {
 	plugin := lynx.Lynx().GetPluginManager().GetPlugin(pluginName)
 	if plugin == nil {
 		return nil
 	}
-	return plugin.(*PlugElasticsearch)
+	es, ok := plugin.(*PlugElasticsearch)
+	if !ok {
+		return nil
+	}
+	return es
+}
+
+// GetIndexName returns the index name with configured prefix applied.
+// Convenience function that delegates to GetElasticsearchPlugin().GetIndexName.
+// Returns name as-is if plugin is not available or index_prefix is not configured.
+func GetIndexName(name string) string {
+	plugin := GetElasticsearchPlugin()
+	if plugin == nil {
+		return name
+	}
+	return plugin.GetIndexName(name)
 }

@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package lynx.protobuf.plugin.elasticsearch;
 
-option go_package = "github.com/go-lynx/lynx/plugins/nosql/elasticsearch/conf;conf";
+option go_package = "github.com/go-lynx/lynx-elasticsearch/conf;conf";
 
 import "google/protobuf/duration.proto";
 

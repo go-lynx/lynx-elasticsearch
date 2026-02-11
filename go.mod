@@ -8,6 +8,7 @@ require (
 	github.com/elastic/go-elasticsearch/v8 v8.12.0
 	github.com/go-kratos/kratos/v2 v2.9.1
 	github.com/go-lynx/lynx v1.5.3
+	github.com/prometheus/client_golang v1.23.0
 	google.golang.org/protobuf v1.36.10
 )
 
@@ -28,7 +29,6 @@ require (
 	github.com/mattn/go-isatty v0.0.19 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/panjf2000/ants/v2 v2.11.3 // indirect
-	github.com/prometheus/client_golang v1.23.0 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.65.0 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect

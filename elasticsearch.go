@@ -2,8 +2,11 @@ package elasticsearch
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"time"
 
 	"github.com/go-lynx/lynx/log"
@@ -66,11 +69,6 @@ func (p *PlugElasticsearch) Start(plugin plugins.Plugin) error {
 		return fmt.Errorf("failed to test elasticsearch connection: %w", err)
 	}
 
-	// Ensure shared quit channel is initialized when any background task is enabled
-	if p.statsQuit == nil && (p.conf.EnableMetrics || p.conf.EnableHealthCheck) {
-		p.statsQuit = make(chan struct{})
-	}
-
 	log.Info("elasticsearch plugin started successfully")
 	return nil
 }
@@ -83,15 +81,8 @@ func (p *PlugElasticsearch) Stop(plugin plugins.Plugin) error {
 		return err
 	}
 
-	// Stop metrics collection
-	if p.conf.EnableMetrics {
-		p.stopMetricsCollection()
-	}
-
-	// Stop health check
-	if p.conf.EnableHealthCheck {
-		p.stopHealthCheck()
-	}
+	// Stop background tasks (metrics + health check) with unified timeout
+	p.stopBackgroundTasks()
 
 	log.Info("elasticsearch plugin stopped successfully")
 	return nil
@@ -125,11 +116,29 @@ func (p *PlugElasticsearch) parseConfig(cfg config.Config) error {
 
 // createClient Create Elasticsearch client
 func (p *PlugElasticsearch) createClient() error {
+	connectTimeout := 30 * time.Second
+	if p.conf.ConnectTimeout != nil {
+		connectTimeout = p.conf.ConnectTimeout.AsDuration()
+	}
+
+	// Create transport with ConnectTimeout
+	dialer := &net.Dialer{Timeout: connectTimeout}
+	baseTransport := &http.Transport{
+		DialContext:           dialer.DialContext,
+		MaxIdleConnsPerHost:   10,
+		ResponseHeaderTimeout: 10 * time.Second,
+	}
+	var transport http.RoundTripper = baseTransport
+	if p.conf.EnableMetrics {
+		transport = newMetricsRoundTripper(baseTransport)
+	}
+
 	// Build client configuration
 	clientConfig := elasticsearch.Config{
 		Addresses:           p.conf.Addresses,
 		MaxRetries:          int(p.conf.MaxRetries),
 		CompressRequestBody: p.conf.CompressRequestBody,
+		Transport:           transport,
 	}
 
 	// Set authentication information
@@ -207,48 +216,68 @@ func (p *PlugElasticsearch) startMetricsCollection() {
 	}()
 }
 
-// stopMetricsCollection Stop metrics collection
-func (p *PlugElasticsearch) stopMetricsCollection() {
-	if p.statsQuit != nil {
-		p.closeStatsQuitOnce()
-		p.statsWG.Wait()
+// stopBackgroundTasks stops metrics collection and health check goroutines with timeout
+func (p *PlugElasticsearch) stopBackgroundTasks() {
+	if p.statsQuit == nil {
+		return
 	}
+	if !p.conf.EnableMetrics && !p.conf.EnableHealthCheck {
+		// No background tasks were started, don't create or close channel
+		return
+	}
+	p.closeStatsQuitOnce()
+	done := make(chan struct{})
+	go func() {
+		p.statsWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Infof("elasticsearch background tasks stopped successfully")
+	case <-time.After(10 * time.Second):
+		log.Warnf("timeout waiting for elasticsearch background tasks to stop")
+	}
+}
+
+// clusterHealthResponse parses Cluster Health API response
+type clusterHealthResponse struct {
+	Status        string `json:"status"`
+	NumberOfNodes int    `json:"number_of_nodes"`
+	ClusterName   string `json:"cluster_name"`
 }
 
 // collectMetrics Collect metrics
 func (p *PlugElasticsearch) collectMetrics() {
-	// Here you can collect Elasticsearch cluster metrics
-	// For example: node status, index statistics, query performance, etc.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Get cluster health status
+	// Get cluster health status and export to Prometheus
 	healthRes, err := p.client.Cluster.Health(p.client.Cluster.Health.WithContext(ctx))
 	if err != nil {
 		log.Errorf("failed to get cluster health: %v", err)
 		return
 	}
 	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			log.Error(err)
-		}
+		_ = Body.Close()
 	}(healthRes.Body)
 
-	// Get cluster statistics
+	if !healthRes.IsError() {
+		var health clusterHealthResponse
+		if err := json.NewDecoder(healthRes.Body).Decode(&health); err == nil {
+			updateClusterMetrics(health.NumberOfNodes, health.Status)
+		}
+	}
+
+	// Cluster.Stats is optional, health gives us the key metrics
 	statsRes, err := p.client.Cluster.Stats(p.client.Cluster.Stats.WithContext(ctx))
 	if err != nil {
-		log.Errorf("failed to get cluster stats: %v", err)
+		log.Debugf("cluster stats skipped: %v", err)
 		return
 	}
 	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			log.Error(err)
-		}
+		_ = Body.Close()
 	}(statsRes.Body)
 
-	// Here you can send metrics to monitoring system
 	log.Debug("elasticsearch metrics collected")
 }
 
@@ -280,25 +309,6 @@ func (p *PlugElasticsearch) startHealthCheck() {
 	}()
 }
 
-// stopHealthCheck Stop health check
-func (p *PlugElasticsearch) stopHealthCheck() {
-	if p.statsQuit != nil {
-		p.closeStatsQuitOnce()
-		// Wait for all goroutines (metrics + health) to exit, set timeout to avoid infinite wait
-		done := make(chan struct{})
-		go func() {
-			p.statsWG.Wait()
-			close(done)
-		}()
-		select {
-		case <-done:
-			log.Infof("elasticsearch background tasks stopped successfully")
-		case <-time.After(10 * time.Second):
-			log.Warnf("timeout waiting for elasticsearch background tasks to stop")
-		}
-	}
-}
-
 // closeStatsQuitOnce closes statsQuit only once in a thread-safe way
 func (p *PlugElasticsearch) closeStatsQuitOnce() {
 	p.statsMu.Lock()
@@ -318,21 +328,28 @@ func (p *PlugElasticsearch) checkHealth() error {
 	start := time.Now()
 	res, err := p.client.Ping(p.client.Ping.WithContext(ctx))
 	if err != nil {
+		if p.conf.EnableMetrics {
+			healthCheckTotal.WithLabelValues("failure").Inc()
+		}
 		return err
 	}
 	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			log.Error(err)
-		}
+		_ = Body.Close()
 	}(res.Body)
-	latency := time.Since(start)
 
-	if res.IsError() {
-		return fmt.Errorf("ping health check failed: status=%d, latency=%s", res.StatusCode, latency)
+	if p.conf.EnableMetrics {
+		if res.IsError() {
+			healthCheckTotal.WithLabelValues("failure").Inc()
+		} else {
+			healthCheckTotal.WithLabelValues("success").Inc()
+		}
 	}
 
-	log.Debugf("elasticsearch ping ok: status=%d, latency=%s", res.StatusCode, latency)
+	if res.IsError() {
+		return fmt.Errorf("ping health check failed: status=%d, latency=%s", res.StatusCode, time.Since(start))
+	}
+
+	log.Debugf("elasticsearch ping ok: status=%d, latency=%s", res.StatusCode, time.Since(start))
 	return nil
 }
 
@@ -356,4 +373,22 @@ func (p *PlugElasticsearch) GetConnectionStats() map[string]any {
 	}
 
 	return stats
+}
+
+// GetIndexName returns the index name with configured prefix applied.
+// If index_prefix is set (e.g. "myapp"), GetIndexName("documents") returns "myapp_documents".
+// If index_prefix is empty, returns the name as-is.
+func (p *PlugElasticsearch) GetIndexName(name string) string {
+	if p.conf == nil || p.conf.IndexPrefix == "" {
+		return name
+	}
+	return p.conf.IndexPrefix + "_" + name
+}
+
+// GetIndexPrefix returns the configured index prefix, or empty string if not set.
+func (p *PlugElasticsearch) GetIndexPrefix() string {
+	if p.conf == nil {
+		return ""
+	}
+	return p.conf.IndexPrefix
 }

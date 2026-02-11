@@ -46,7 +46,7 @@ import (
     "log"
     
     "github.com/go-lynx/lynx/app/boot"
-    "github.com/go-lynx/lynx/plugins/nosql/elasticsearch"
+    "github.com/go-lynx/lynx-elasticsearch"
     "github.com/elastic/go-elasticsearch/v8/esapi"
 )
 
@@ -218,6 +218,11 @@ plugin := elasticsearch.GetElasticsearchPlugin()
 
 // Get connection statistics
 stats := plugin.GetConnectionStats()
+
+// Get index name with prefix (e.g. index_prefix: "myapp" -> GetIndexName("documents") = "myapp_documents")
+indexName := elasticsearch.GetIndexName("documents")
+// Or via plugin:
+indexName := plugin.GetIndexName("documents")
 ```
 
 ### Plugin Options

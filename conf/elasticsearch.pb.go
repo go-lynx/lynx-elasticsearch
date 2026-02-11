@@ -206,7 +206,7 @@ const file_elasticsearch_proto_rawDesc = "" +
 	"\x13enable_health_check\x18\v \x01(\bR\x11enableHealthCheck\x12M\n" +
 	"\x15health_check_interval\x18\f \x01(\v2\x19.google.protobuf.DurationR\x13healthCheckInterval\x12!\n" +
 	"\findex_prefix\x18\r \x01(\tR\vindexPrefix\x12\x1b\n" +
-	"\tlog_level\x18\x0e \x01(\tR\blogLevelB?Z=github.com/go-lynx/lynx/plugins/nosql/elasticsearch/conf;confb\x06proto3"
+	"\tlog_level\x18\x0e \x01(\tR\blogLevelB1Z/github.com/go-lynx/lynx-elasticsearch/conf;confb\x06proto3"
 
 var (
 	file_elasticsearch_proto_rawDescOnce sync.Once
