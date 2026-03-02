@@ -9,7 +9,7 @@ const (
 	// Plugin unique name
 	pluginName = "elasticsearch.client"
 	// Plugin version number
-	pluginVersion = "v1.0.0"
+	pluginVersion = "v1.5.4"
 	// Plugin description
 	pluginDescription = "elasticsearch plugin for lynx framework"
 	// Configuration prefix, used to read plugin-related configuration from config
