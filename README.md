@@ -11,7 +11,6 @@ The Elasticsearch plugin provides complete Elasticsearch integration support for
 - ✅ **Automatic retry mechanisms**
 - ✅ **Health checks**
 - ✅ **Metrics monitoring**
-- ✅ **Hot configuration updates**
 
 ## Quick Start
 
@@ -24,17 +23,41 @@ lynx:
   elasticsearch:
     addresses:
       - "http://localhost:9200"
-      - "http://localhost:9201"
     username: "elastic"
     password: "changeme"
-    max_retries: 3
+    api_key: ""
+    service_token: ""
+    certificate_fingerprint: ""
+    compress_request_body: true
     connect_timeout: "30s"
+    max_retries: 3
     enable_metrics: true
     enable_health_check: true
     health_check_interval: "30s"
-    compress_request_body: true
     index_prefix: "myapp"
+    log_level: "info"
 ```
+
+Complete example: [conf/example_config.yml](./conf/example_config.yml).
+
+### Configuration Reference
+
+| Field | Proto Type | Default Value | Example | Notes |
+|-------|------------|---------------|---------|-------|
+| `addresses` | `repeated string` | `["http://localhost:9200"]` | `["http://es-1:9200", "http://es-2:9200"]` | List of Elasticsearch node addresses. |
+| `username` | `string` | `""` | `"elastic"` | Basic-auth username. |
+| `password` | `string` | `""` | `"changeme"` | Basic-auth password. |
+| `api_key` | `string` | `""` | `"base64-api-key"` | API key authentication. Set instead of username/password when appropriate. |
+| `service_token` | `string` | `""` | `"AAEAA..."` | Service token authentication. |
+| `certificate_fingerprint` | `string` | `""` | `"3A:8B:..."` | Server certificate fingerprint pinning. |
+| `compress_request_body` | `bool` | `false` | `true` | Enables compressed HTTP request bodies. |
+| `connect_timeout` | `google.protobuf.Duration` | `"30s"` | `"30s"` | TCP connect timeout for Elasticsearch HTTP transport. |
+| `max_retries` | `int32` | `3` | `5` | Maximum HTTP retry count used by the Elasticsearch client. |
+| `enable_metrics` | `bool` | `false` | `true` | Enables Prometheus-style request metrics. |
+| `enable_health_check` | `bool` | `false` | `true` | Starts background health checks. |
+| `health_check_interval` | `google.protobuf.Duration` | `"30s"` | `"30s"` | Interval used by background health checks. |
+| `index_prefix` | `string` | `""` | `"myapp"` | Prefix used by `GetIndexName`, producing names such as `myapp_documents`. |
+| `log_level` | `string` | `""` | `"info"` | Reserved field in the current implementation; the value is stored in config but does not currently reconfigure logging. |
 
 ### 2. Usage
 
@@ -43,11 +66,15 @@ package main
 
 import (
     "context"
+    "encoding/json"
     "log"
-    
-    "github.com/go-lynx/lynx/app/boot"
-    "github.com/go-lynx/lynx-elasticsearch"
+    "strings"
+    "time"
+
+    es8 "github.com/elastic/go-elasticsearch/v8"
     "github.com/elastic/go-elasticsearch/v8/esapi"
+    "github.com/go-lynx/lynx/app/boot"
+    esplugin "github.com/go-lynx/lynx-elasticsearch"
 )
 
 func main() {
@@ -55,7 +82,7 @@ func main() {
     boot.LynxApplication(wireApp).Run()
     
     // Get Elasticsearch client
-    client := elasticsearch.GetElasticsearch()
+    client := esplugin.GetElasticsearch()
     if client == nil {
         log.Fatal("failed to get elasticsearch client")
     }
@@ -70,7 +97,7 @@ func main() {
     searchDocuments(client)
 }
 
-func createIndex(client *elasticsearch.Client) {
+func createIndex(client *es8.Client) {
     ctx := context.Background()
     
     // Create index mapping
@@ -104,7 +131,7 @@ func createIndex(client *elasticsearch.Client) {
     log.Println("index created successfully")
 }
 
-func indexDocument(client *elasticsearch.Client) {
+func indexDocument(client *es8.Client) {
     ctx := context.Background()
     
     // Document data
@@ -136,7 +163,7 @@ func indexDocument(client *elasticsearch.Client) {
     log.Println("document indexed successfully")
 }
 
-func searchDocuments(client *elasticsearch.Client) {
+func searchDocuments(client *es8.Client) {
     ctx := context.Background()
     
     // Search query
@@ -188,22 +215,7 @@ func mustEncodeJSON(v interface{}) string {
 
 ## Configuration Options
 
-| Configuration Item | Type | Default Value | Description |
-|-------------------|------|---------------|-------------|
-| `addresses` | `[]string` | `["http://localhost:9200"]` | List of Elasticsearch server addresses |
-| `username` | `string` | `""` | Username |
-| `password` | `string` | `""` | Password |
-| `api_key` | `string` | `""` | API Key |
-| `service_token` | `string` | `""` | Service token |
-| `certificate_fingerprint` | `string` | `""` | Certificate fingerprint |
-| `compress_request_body` | `bool` | `false` | Whether to compress request body |
-| `connect_timeout` | `string` | `"30s"` | Connection timeout |
-| `max_retries` | `int` | `3` | Maximum retry count |
-| `enable_metrics` | `bool` | `false` | Whether to enable metrics collection |
-| `enable_health_check` | `bool` | `false` | Whether to enable health checks |
-| `health_check_interval` | `string` | `"30s"` | Health check interval |
-| `index_prefix` | `string` | `""` | Index prefix |
-| `log_level` | `string` | `"info"` | Log level |
+See the proto-aligned table in the Quick Start section above for the complete field list, defaults, and examples sourced from `conf/elasticsearch.proto`.
 
 ## API Reference
 
@@ -211,16 +223,16 @@ func mustEncodeJSON(v interface{}) string {
 
 ```go
 // Get Elasticsearch client
-client := elasticsearch.GetElasticsearch()
+client := esplugin.GetElasticsearch()
 
 // Get plugin instance
-plugin := elasticsearch.GetElasticsearchPlugin()
+plugin := esplugin.GetElasticsearchPlugin()
 
 // Get connection statistics
 stats := plugin.GetConnectionStats()
 
 // Get index name with prefix (e.g. index_prefix: "myapp" -> GetIndexName("documents") = "myapp_documents")
-indexName := elasticsearch.GetIndexName("documents")
+indexName := esplugin.GetIndexName("documents")
 // Or via plugin:
 indexName := plugin.GetIndexName("documents")
 ```
@@ -229,12 +241,12 @@ indexName := plugin.GetIndexName("documents")
 
 ```go
 // Configure plugin using option pattern
-plugin := elasticsearch.NewElasticsearchClient(
-    elasticsearch.WithAddresses([]string{"http://localhost:9200"}),
-    elasticsearch.WithCredentials("elastic", "changeme"),
-    elasticsearch.WithMaxRetries(5),
-    elasticsearch.WithMetrics(true),
-    elasticsearch.WithHealthCheck(true, 30*time.Second),
+plugin := esplugin.NewElasticsearchClient(
+    esplugin.WithAddresses([]string{"http://localhost:9200"}),
+    esplugin.WithCredentials("elastic", "changeme"),
+    esplugin.WithMaxRetries(5),
+    esplugin.WithMetrics(true),
+    esplugin.WithHealthCheck(true, 30*time.Second),
 )
 ```
 
@@ -242,20 +254,19 @@ plugin := elasticsearch.NewElasticsearchClient(
 
 The plugin provides the following monitoring capabilities:
 
-- **Connection status monitoring**
+- **HTTP operation counters and latency histograms**
 - **Cluster health status**
-- **Index statistics**
-- **Query performance metrics**
-- **Error rate statistics**
+- **Approximate active node count**
+- **Health-check success/failure counters**
+- **Request error counters**
 
 ## Health Checks
 
 The plugin supports automatic health checks and can monitor:
 
-- Cluster connection status
-- Node health status
-- Index availability
-- Query response time
+- Ping reachability to configured nodes
+- Health-check latency
+- Success/failure counts for background checks
 
 ## Error Handling
 
@@ -295,13 +306,11 @@ The plugin provides comprehensive error handling mechanisms:
 
 ### Log Debugging
 
-Enable debug logging:
+The `log_level` field is currently stored in config but does not reconfigure plugin logging by itself. Use your application-level logger and the Prometheus metrics/health endpoints for troubleshooting.
 
-```yaml
-lynx:
-  elasticsearch:
-    log_level: "debug"
-```
+## Validation
+
+Current automated baseline in this workspace is `go test ./... -> [no test files]`. See [VALIDATION.md](./VALIDATION.md) for the exact output and the recommended manual smoke checks.
 
 ## License
 
