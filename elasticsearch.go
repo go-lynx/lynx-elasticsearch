@@ -18,6 +18,15 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
+const (
+	defaultConnectTimeout            = 30 * time.Second
+	defaultHealthCheckInterval       = 30 * time.Second
+	defaultMaxRetries          int32 = 3
+	maxConnectTimeout                = 5 * time.Minute
+	maxHealthCheckInterval           = 24 * time.Hour
+	maxRetriesBound            int32 = 10
+)
+
 // Initialize Elasticsearch plugin
 func (p *PlugElasticsearch) Initialize(plugin plugins.Plugin, rt plugins.Runtime) error {
 	err := p.BasePlugin.Initialize(plugin, rt)
@@ -102,21 +111,25 @@ func (p *PlugElasticsearch) parseConfig(cfg config.Config) error {
 		p.conf.Addresses = []string{"http://localhost:9200"}
 	}
 	if p.conf.MaxRetries == 0 {
-		p.conf.MaxRetries = 3
+		p.conf.MaxRetries = defaultMaxRetries
 	}
 	if p.conf.ConnectTimeout == nil {
-		p.conf.ConnectTimeout = durationpb.New(30 * time.Second)
+		p.conf.ConnectTimeout = durationpb.New(defaultConnectTimeout)
 	}
 	if p.conf.HealthCheckInterval == nil {
-		p.conf.HealthCheckInterval = durationpb.New(30 * time.Second)
+		p.conf.HealthCheckInterval = durationpb.New(defaultHealthCheckInterval)
 	}
 
-	return nil
+	return validateElasticsearchConfig(p.conf)
 }
 
 // createClient Create Elasticsearch client
 func (p *PlugElasticsearch) createClient() error {
-	connectTimeout := 30 * time.Second
+	if err := validateElasticsearchConfig(p.conf); err != nil {
+		return err
+	}
+
+	connectTimeout := defaultConnectTimeout
 	if p.conf.ConnectTimeout != nil {
 		connectTimeout = p.conf.ConnectTimeout.AsDuration()
 	}
@@ -284,6 +297,10 @@ func (p *PlugElasticsearch) collectMetrics() {
 // startHealthCheck Start health check
 func (p *PlugElasticsearch) startHealthCheck() {
 	interval := p.conf.HealthCheckInterval.AsDuration()
+	if interval <= 0 {
+		log.Warnf("skipping elasticsearch health check: invalid interval %s", interval)
+		return
+	}
 
 	// Ensure quit channel exists
 	if p.statsQuit == nil {
@@ -391,4 +408,42 @@ func (p *PlugElasticsearch) GetIndexPrefix() string {
 		return ""
 	}
 	return p.conf.IndexPrefix
+}
+
+func validateElasticsearchConfig(cfg *conf.Elasticsearch) error {
+	if cfg == nil {
+		return fmt.Errorf("elasticsearch config is required")
+	}
+
+	if cfg.ConnectTimeout != nil {
+		timeout := cfg.ConnectTimeout.AsDuration()
+		if timeout <= 0 {
+			return fmt.Errorf("connect_timeout must be greater than 0")
+		}
+		if timeout > maxConnectTimeout {
+			return fmt.Errorf("connect_timeout must not exceed %s", maxConnectTimeout)
+		}
+	}
+
+	if cfg.MaxRetries < 0 {
+		return fmt.Errorf("max_retries must be greater than or equal to 0")
+	}
+	if cfg.MaxRetries > maxRetriesBound {
+		return fmt.Errorf("max_retries must not exceed %d", maxRetriesBound)
+	}
+
+	if cfg.HealthCheckInterval != nil {
+		interval := cfg.HealthCheckInterval.AsDuration()
+		if interval <= 0 {
+			return fmt.Errorf("health_check_interval must be greater than 0")
+		}
+		if interval > maxHealthCheckInterval {
+			return fmt.Errorf("health_check_interval must not exceed %s", maxHealthCheckInterval)
+		}
+		if cfg.EnableHealthCheck && interval < time.Second {
+			return fmt.Errorf("health_check_interval must be at least 1s when enable_health_check is true")
+		}
+	}
+
+	return nil
 }

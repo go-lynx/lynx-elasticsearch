@@ -1,6 +1,7 @@
 package elasticsearch
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -175,4 +176,76 @@ func TestParseESPathAndCloseStatsQuitOnce(t *testing.T) {
 		t.Fatal("expected statsQuit to be closed")
 	}
 	plugin.closeStatsQuitOnce()
+}
+
+func TestParseConfigRejectsInvalidBoundaries(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *conf.Elasticsearch
+		want string
+	}{
+		{
+			name: "non-positive connect timeout",
+			cfg: &conf.Elasticsearch{
+				ConnectTimeout: durationpb.New(0),
+			},
+			want: "connect_timeout must be greater than 0",
+		},
+		{
+			name: "negative max retries",
+			cfg: &conf.Elasticsearch{
+				MaxRetries: -1,
+			},
+			want: "max_retries must be greater than or equal to 0",
+		},
+		{
+			name: "health check interval too small when enabled",
+			cfg: &conf.Elasticsearch{
+				EnableHealthCheck:   true,
+				HealthCheckInterval: durationpb.New(500 * time.Millisecond),
+			},
+			want: "health_check_interval must be at least 1s",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plugin := NewElasticsearchClient()
+			err := plugin.parseConfig(&stubConfig{cfg: tt.cfg})
+			if err == nil {
+				t.Fatalf("expected parseConfig to fail for %s", tt.name)
+			}
+			if got := err.Error(); got == "" || !strings.Contains(got, tt.want) {
+				t.Fatalf("expected error containing %q, got %q", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestCreateClientRejectsInvalidConnectTimeout(t *testing.T) {
+	plugin := NewElasticsearchClient()
+	plugin.conf = &conf.Elasticsearch{
+		Addresses:      []string{"http://localhost:9200"},
+		ConnectTimeout: durationpb.New(0),
+	}
+
+	if err := plugin.createClient(); err == nil {
+		t.Fatal("expected createClient to reject invalid connect_timeout")
+	}
+}
+
+func TestStartHealthCheckWithInvalidIntervalDoesNotPanic(t *testing.T) {
+	plugin := NewElasticsearchClient()
+	plugin.conf = &conf.Elasticsearch{
+		EnableHealthCheck:   true,
+		HealthCheckInterval: durationpb.New(0),
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("startHealthCheck should not panic on invalid interval: %v", r)
+		}
+	}()
+
+	plugin.startHealthCheck()
 }

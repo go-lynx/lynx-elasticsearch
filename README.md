@@ -59,6 +59,12 @@ Complete example: [conf/example_config.yml](./conf/example_config.yml).
 | `index_prefix` | `string` | `""` | `"myapp"` | Prefix used by `GetIndexName`, producing names such as `myapp_documents`. |
 | `log_level` | `string` | `""` | `"info"` | Reserved field in the current implementation; the value is stored in config but does not currently reconfigure logging. |
 
+Validation boundaries applied by the runtime:
+
+- `connect_timeout` must be greater than `0` and not exceed `5m`.
+- `max_retries` must stay within `0` to `10`.
+- `health_check_interval` must be greater than `0`, and when `enable_health_check=true` it must be at least `1s`.
+
 ### 2. Usage
 
 ```go
@@ -310,7 +316,7 @@ The `log_level` field is currently stored in config but does not reconfigure plu
 
 ## Validation
 
-Current automated baseline in this workspace is `go test ./... -> [no test files]`. See [VALIDATION.md](./VALIDATION.md) for the exact output and the recommended manual smoke checks.
+Current automated baseline in this workspace is `go test ./...` plus `go vet ./...`. See [VALIDATION.md](./VALIDATION.md) for the release-gate scope and the recommended manual smoke checks.
 
 ## License
 

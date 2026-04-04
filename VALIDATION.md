@@ -6,23 +6,18 @@ Current workspace baseline:
 
 ```bash
 go test ./...
-```
-
-Result summary:
-
-```text
-?   	github.com/go-lynx/lynx-elasticsearch       [no test files]
-?   	github.com/go-lynx/lynx-elasticsearch/conf  [no test files]
+go vet ./...
 ```
 
 ## What This Means
 
-- This module currently has no committed Go test files in the workspace.
-- README examples document the public surface, but they are not covered by automated unit or integration tests yet.
-- Any future changes around background metrics collection, health checks, or request retry behavior should add executable tests before the README claims stronger guarantees.
+- Unit tests cover defaults, index helpers, path parsing, and the production guardrails that reject invalid `connect_timeout`, `max_retries`, and `health_check_interval` values before background health checks can panic.
+- `go vet ./...` is part of the local release gate and must stay green alongside `go test ./...`.
+- README examples still document the public surface, but they are not a substitute for a live Elasticsearch smoke test.
 
 ## Recommended Manual Checks
 
 - Start against a reachable Elasticsearch cluster and verify `GetElasticsearch()` returns a non-nil client after plugin initialization.
+- Confirm invalid values such as `connect_timeout: "0s"` or `health_check_interval: "0s"` fail fast during initialization instead of reaching runtime panic paths.
 - Enable `enable_health_check` and `enable_metrics`, then confirm background ping/cluster-health collection works without leaking goroutines on shutdown.
 - Verify `index_prefix` through `GetIndexName("documents")` and exercise at least one create/index/search request with the sample config.
