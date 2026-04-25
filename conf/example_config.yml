@@ -4,8 +4,8 @@ lynx:
     addresses:
       - "http://localhost:9200"
       - "http://localhost:9201"
-    username: "elastic"
-    password: "changeme"
+    username: ""  # Inject through environment-specific config when auth is required
+    password: ""  # Inject through a secret manager; do not commit real credentials
     api_key: ""  # Optional: API Key authentication
     service_token: ""  # Optional: Service token authentication
     certificate_fingerprint: ""  # Optional: Certificate fingerprint
