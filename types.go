@@ -8,17 +8,24 @@ import (
 	"github.com/go-lynx/lynx/plugins"
 )
 
-// PlugElasticsearch represents an Elasticsearch plugin instance
+// PlugElasticsearch is the Lynx plugin that manages the lifecycle of an Elasticsearch
+// client.  It initialises the client from YAML configuration, bootstraps background
+// goroutines for metrics collection and health checks, and exposes the underlying
+// *elasticsearch.Client for use by application code via GetClient or the package-level
+// GetElasticsearch helper.
 type PlugElasticsearch struct {
-	// Inherits from base plugin
+	// BasePlugin provides plugin identity, configuration prefix, and lifecycle helpers.
 	*plugins.BasePlugin
-	// Elasticsearch configuration
+	// conf holds the parsed plugin configuration.
 	conf *conf.Elasticsearch
-	// Elasticsearch client instance
+	// client is the underlying Elasticsearch client instance.
 	client *elasticsearch.Client
-	// Metrics collection
-	statsQuit   chan struct{}
-	statsWG     sync.WaitGroup
+	// statsQuit is closed to signal background goroutines to exit.
+	statsQuit chan struct{}
+	// statsWG tracks running background goroutines so Stop can wait for them.
+	statsWG sync.WaitGroup
+	// statsClosed ensures statsQuit is only closed once.
 	statsClosed bool
-	statsMu     sync.Mutex
+	// statsMu guards statsClosed.
+	statsMu sync.Mutex
 }

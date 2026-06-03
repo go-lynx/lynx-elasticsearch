@@ -22,6 +22,106 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 )
 
+// BulkPartialFailureError is returned when an Elasticsearch bulk request succeeds at the
+// HTTP level (status 200) but one or more individual actions within the batch reported an
+// error.  Callers that care about per-document success MUST inspect this error type and
+// handle the failed items accordingly; ignoring it risks silent data loss.
+//
+// Note: the metricsRoundTripper cannot detect bulk partial failures because the response
+// body is a streaming resource consumed by the caller.  Detection must be done at the
+// application layer by parsing the bulk response and checking the top-level "errors" field.
+type BulkPartialFailureError struct {
+	// FailedCount is the number of individual bulk items that were rejected.
+	FailedCount int
+	// Errors contains the per-item error details, keyed by zero-based action index.
+	Errors []BulkItemError
+}
+
+// Error implements the error interface.
+func (e *BulkPartialFailureError) Error() string {
+	return fmt.Sprintf("elasticsearch bulk partial failure: %d item(s) failed", e.FailedCount)
+}
+
+// BulkItemError captures the error details for a single failed bulk action.
+type BulkItemError struct {
+	// Index is the target index for the failed action.
+	Index string `json:"_index"`
+	// ID is the document ID for the failed action, if available.
+	ID string `json:"_id"`
+	// Status is the HTTP status code returned for this specific action.
+	Status int `json:"status"`
+	// ErrorType is the Elasticsearch error type string (e.g. "version_conflict_engine_exception").
+	ErrorType string `json:"type"`
+	// Reason is the human-readable error description.
+	Reason string `json:"reason"`
+}
+
+// bulkResponseItem is the per-action element inside a bulk response body.
+type bulkResponseItem struct {
+	Index  *bulkActionResult `json:"index"`
+	Create *bulkActionResult `json:"create"`
+	Update *bulkActionResult `json:"update"`
+	Delete *bulkActionResult `json:"delete"`
+}
+
+// bulkActionResult captures the result for one bulk action.
+type bulkActionResult struct {
+	Index  string `json:"_index"`
+	ID     string `json:"_id"`
+	Status int    `json:"status"`
+	Error  *struct {
+		Type   string `json:"type"`
+		Reason string `json:"reason"`
+	} `json:"error"`
+}
+
+// bulkResponse is the top-level structure of an Elasticsearch bulk API response.
+type bulkResponse struct {
+	Errors bool               `json:"errors"`
+	Items  []bulkResponseItem `json:"items"`
+}
+
+// CheckBulkResponse parses an Elasticsearch bulk API response body and returns a
+// BulkPartialFailureError if any individual actions failed.  The caller is responsible
+// for closing body after this call.  A nil error means all actions succeeded.
+//
+// Usage:
+//
+//	res, err := client.Bulk(body)
+//	if err != nil { ... }
+//	defer res.Body.Close()
+//	if err := elasticsearch.CheckBulkResponse(res.Body); err != nil { ... }
+func CheckBulkResponse(body io.Reader) error {
+	var br bulkResponse
+	if err := json.NewDecoder(body).Decode(&br); err != nil {
+		return fmt.Errorf("failed to decode bulk response: %w", err)
+	}
+	if !br.Errors {
+		return nil
+	}
+
+	var failedItems []BulkItemError
+	for _, item := range br.Items {
+		for _, result := range []*bulkActionResult{item.Index, item.Create, item.Update, item.Delete} {
+			if result != nil && result.Error != nil {
+				failedItems = append(failedItems, BulkItemError{
+					Index:     result.Index,
+					ID:        result.ID,
+					Status:    result.Status,
+					ErrorType: result.Error.Type,
+					Reason:    result.Error.Reason,
+				})
+			}
+		}
+	}
+
+	if len(failedItems) == 0 {
+		// Paranoia: errors flag set but no per-item errors found; treat as failure.
+		return &BulkPartialFailureError{FailedCount: 1}
+	}
+	return &BulkPartialFailureError{FailedCount: len(failedItems), Errors: failedItems}
+}
+
 const (
 	defaultConnectTimeout            = 30 * time.Second
 	defaultHealthCheckInterval       = 30 * time.Second
@@ -127,7 +227,8 @@ func (p *PlugElasticsearch) parseConfig(cfg config.Config) error {
 	return validateElasticsearchConfig(p.conf)
 }
 
-// createClient Create Elasticsearch client
+// createClient builds and stores an Elasticsearch client from the current configuration.
+// validateElasticsearchConfig must have been called before this method.
 func (p *PlugElasticsearch) createClient() error {
 	if err := validateElasticsearchConfig(p.conf); err != nil {
 		return err
@@ -210,12 +311,20 @@ func (p *PlugElasticsearch) testConnection() error {
 	return nil
 }
 
-// startMetricsCollection Start metrics collection
+// startMetricsCollection launches a background goroutine that periodically calls
+// collectMetrics.  The goroutine exits when statsQuit is closed and recovers from
+// any internal panics so that a transient failure never brings down the process.
 func (p *PlugElasticsearch) startMetricsCollection() {
 	if p.statsQuit == nil {
 		p.statsQuit = make(chan struct{})
 	}
 	p.statsWG.Go(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("elasticsearch metrics collection goroutine panicked: %v", r)
+			}
+		}()
+
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
@@ -230,13 +339,12 @@ func (p *PlugElasticsearch) startMetricsCollection() {
 	})
 }
 
-// stopBackgroundTasks stops metrics collection and health check goroutines with timeout
+// stopBackgroundTasks signals the shared quit channel and waits up to 10 s for all
+// background goroutines (metrics collection, health check) to exit.  It is safe to call
+// when no background tasks were started.
 func (p *PlugElasticsearch) stopBackgroundTasks() {
 	if p.statsQuit == nil {
-		return
-	}
-	if !p.conf.EnableMetrics && !p.conf.EnableHealthCheck {
-		// No background tasks were started, don't create or close channel
+		// No background goroutines were ever launched.
 		return
 	}
 	p.closeStatsQuitOnce()
@@ -253,19 +361,20 @@ func (p *PlugElasticsearch) stopBackgroundTasks() {
 	}
 }
 
-// clusterHealthResponse parses Cluster Health API response
+// clusterHealthResponse holds the fields we care about from the Cluster Health API.
 type clusterHealthResponse struct {
+	ClusterName   string `json:"cluster_name"`
 	Status        string `json:"status"`
 	NumberOfNodes int    `json:"number_of_nodes"`
-	ClusterName   string `json:"cluster_name"`
 }
 
-// collectMetrics Collect metrics
+// collectMetrics fetches cluster health via the Elasticsearch Cluster Health API and
+// updates the Prometheus gauges.  It is intended to be called periodically from the
+// background metrics-collection goroutine.
 func (p *PlugElasticsearch) collectMetrics() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Get cluster health status and export to Prometheus
 	healthRes, err := p.client.Cluster.Health(p.client.Cluster.Health.WithContext(ctx))
 	if err != nil {
 		log.Errorf("failed to get cluster health: %v", err)
@@ -275,27 +384,29 @@ func (p *PlugElasticsearch) collectMetrics() {
 		_ = Body.Close()
 	}(healthRes.Body)
 
-	if !healthRes.IsError() {
-		var health clusterHealthResponse
-		if err := json.NewDecoder(healthRes.Body).Decode(&health); err == nil {
-			updateClusterMetrics(health.NumberOfNodes, health.Status)
-		}
-	}
-
-	// Cluster.Stats is optional, health gives us the key metrics
-	statsRes, err := p.client.Cluster.Stats(p.client.Cluster.Stats.WithContext(ctx))
-	if err != nil {
-		log.Debugf("cluster stats skipped: %v", err)
+	if healthRes.IsError() {
+		log.Errorf("cluster health API returned error status %d", healthRes.StatusCode)
 		return
 	}
-	defer func(Body io.ReadCloser) {
-		_ = Body.Close()
-	}(statsRes.Body)
 
+	var health clusterHealthResponse
+	if err := json.NewDecoder(healthRes.Body).Decode(&health); err != nil {
+		log.Errorf("failed to decode cluster health response: %v", err)
+		return
+	}
+
+	clusterName := health.ClusterName
+	if clusterName == "" {
+		clusterName = "elasticsearch"
+	}
+	updateClusterMetrics(clusterName, health.NumberOfNodes, health.Status)
 	log.Debug("elasticsearch metrics collected")
 }
 
-// startHealthCheck Start health check
+// startHealthCheck launches a background goroutine that calls checkHealth at the
+// configured interval.  It is a no-op when the configured interval is <= 0.
+// The goroutine recovers from panics to prevent a transient failure from crashing
+// the process.
 func (p *PlugElasticsearch) startHealthCheck() {
 	interval := p.conf.HealthCheckInterval.AsDuration()
 	if interval <= 0 {
@@ -303,12 +414,18 @@ func (p *PlugElasticsearch) startHealthCheck() {
 		return
 	}
 
-	// Ensure quit channel exists
+	// Ensure the shared quit channel exists before launching.
 	if p.statsQuit == nil {
 		p.statsQuit = make(chan struct{})
 	}
 
 	p.statsWG.Go(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("elasticsearch health check goroutine panicked: %v", r)
+			}
+		}()
+
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -335,37 +452,63 @@ func (p *PlugElasticsearch) closeStatsQuitOnce() {
 	}
 }
 
-// checkHealth Perform health check
+// checkHealth performs a cluster health check using the Elasticsearch Cluster Health API.
+// Unlike a simple ping, this also captures the cluster status (green/yellow/red) and
+// updates the cluster_status Prometheus gauge so operators are alerted when the cluster
+// is degraded.  A "red" cluster status is treated as an error because it signals data
+// unavailability or shard allocation failures.
 func (p *PlugElasticsearch) checkHealth() error {
-	// Use lightweight Ping for health check to avoid higher overhead of Cluster Health
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	start := time.Now()
-	res, err := p.client.Ping(p.client.Ping.WithContext(ctx))
+	res, err := p.client.Cluster.Health(p.client.Cluster.Health.WithContext(ctx))
 	if err != nil {
 		if p.conf.EnableMetrics {
 			healthCheckTotal.WithLabelValues("failure").Inc()
 		}
-		return err
+		return fmt.Errorf("cluster health request failed: %w", err)
 	}
 	defer func(Body io.ReadCloser) {
 		_ = Body.Close()
 	}(res.Body)
 
+	latency := time.Since(start)
+
+	if res.IsError() {
+		if p.conf.EnableMetrics {
+			healthCheckTotal.WithLabelValues("failure").Inc()
+		}
+		return fmt.Errorf("cluster health check failed: status=%d, latency=%s", res.StatusCode, latency)
+	}
+
+	var health clusterHealthResponse
+	if err := json.NewDecoder(res.Body).Decode(&health); err != nil {
+		if p.conf.EnableMetrics {
+			healthCheckTotal.WithLabelValues("failure").Inc()
+		}
+		return fmt.Errorf("failed to decode cluster health response: %w", err)
+	}
+
 	if p.conf.EnableMetrics {
-		if res.IsError() {
+		clusterName := health.ClusterName
+		if clusterName == "" {
+			clusterName = "elasticsearch"
+		}
+		updateClusterMetrics(clusterName, health.NumberOfNodes, health.Status)
+		if health.Status == "red" {
 			healthCheckTotal.WithLabelValues("failure").Inc()
 		} else {
 			healthCheckTotal.WithLabelValues("success").Inc()
 		}
 	}
 
-	if res.IsError() {
-		return fmt.Errorf("ping health check failed: status=%d, latency=%s", res.StatusCode, time.Since(start))
-	}
+	log.Debugf("elasticsearch cluster health: status=%s, nodes=%d, latency=%s",
+		health.Status, health.NumberOfNodes, latency)
 
-	log.Debugf("elasticsearch ping ok: status=%d, latency=%s", res.StatusCode, time.Since(start))
+	if health.Status == "red" {
+		return fmt.Errorf("cluster health is red (data unavailable), latency=%s", latency)
+	}
 	return nil
 }
 
@@ -409,6 +552,9 @@ func (p *PlugElasticsearch) GetIndexPrefix() string {
 	return p.conf.IndexPrefix
 }
 
+// validateElasticsearchConfig checks that the supplied configuration is self-consistent
+// and within safe operating bounds.  It returns a descriptive error on the first
+// violation found.
 func validateElasticsearchConfig(cfg *conf.Elasticsearch) error {
 	if cfg == nil {
 		return fmt.Errorf("elasticsearch config is required")
