@@ -76,11 +76,19 @@ var (
 	)
 )
 
-// metricsRoundTripper wraps http.RoundTripper to record request metrics
+// metricsRoundTripper is an http.RoundTripper decorator that records per-operation
+// Prometheus counters and histograms for every Elasticsearch HTTP request.
+//
+// Limitation: bulk partial failures (HTTP 200 with "errors":true in the JSON body)
+// cannot be detected at this layer because the response body is a streaming resource
+// consumed by the caller.  Use CheckBulkResponse to detect partial failures after
+// receiving the response.
 type metricsRoundTripper struct {
 	next http.RoundTripper
 }
 
+// newMetricsRoundTripper wraps next with metric instrumentation.  If next is nil,
+// http.DefaultTransport is used.
 func newMetricsRoundTripper(next http.RoundTripper) *metricsRoundTripper {
 	if next == nil {
 		next = http.DefaultTransport
@@ -113,10 +121,15 @@ func (m *metricsRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 	return resp, err
 }
 
-// parseESPath extracts operation type and index from Elasticsearch request path
-// e.g. /myindex/_search -> ("search", "myindex")
-// e.g. /myindex/_doc/1 -> ("index", "myindex")
-// e.g. /_bulk -> ("bulk", "")
+// parseESPath extracts an operation label and an index name from an Elasticsearch
+// HTTP request path for use as Prometheus metric labels.
+//
+// Examples:
+//
+//	/myindex/_search  → ("search", "myindex")
+//	/myindex/_doc/1   → ("index",  "myindex")
+//	/_bulk            → ("bulk",   "")
+//	/_cluster/health  → ("_cluster", "")
 func parseESPath(path string) (op, index string) {
 	path = strings.TrimPrefix(path, "/")
 	parts := strings.Split(path, "/")
@@ -155,8 +168,20 @@ func parseESPath(path string) (op, index string) {
 	return "unknown", index
 }
 
-// updateClusterMetrics updates cluster-level metrics from health/stats response
-func updateClusterMetrics(nodeCount int, status string) {
+// updateClusterMetrics updates cluster-level Prometheus gauges from a Cluster Health
+// response.  clusterName is the name reported by Elasticsearch; nodeCount is the
+// current number of nodes in the cluster; status is the cluster health colour
+// ("green", "yellow", or "red").
+//
+// The clusterStatus gauge encodes health colour as a numeric value:
+//
+//	2 = green  (all shards assigned, no issues)
+//	1 = yellow (primary shards assigned, some replicas unassigned)
+//	0 = red    (some primary shards unassigned — data may be unavailable)
+func updateClusterMetrics(clusterName string, nodeCount int, status string) {
+	if clusterName == "" {
+		clusterName = "elasticsearch"
+	}
 	if nodeCount > 0 {
 		activeConnections.Set(float64(nodeCount))
 	}
@@ -169,5 +194,5 @@ func updateClusterMetrics(nodeCount int, status string) {
 	case "red":
 		statusVal = 0
 	}
-	clusterStatus.WithLabelValues("elasticsearch").Set(statusVal)
+	clusterStatus.WithLabelValues(clusterName).Set(statusVal)
 }

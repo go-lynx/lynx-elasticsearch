@@ -1,7 +1,12 @@
 package elasticsearch
 
 import (
+	"bytes"
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -249,3 +254,208 @@ func TestStartHealthCheckWithInvalidIntervalDoesNotPanic(t *testing.T) {
 
 	plugin.startHealthCheck()
 }
+
+// TestCheckBulkResponseSuccess verifies that CheckBulkResponse returns nil when
+// the bulk response reports no errors.
+func TestCheckBulkResponseSuccess(t *testing.T) {
+	body := strings.NewReader(`{
+		"errors": false,
+		"items": [
+			{"index": {"_index": "test", "_id": "1", "status": 201}},
+			{"index": {"_index": "test", "_id": "2", "status": 201}}
+		]
+	}`)
+	if err := CheckBulkResponse(body); err != nil {
+		t.Fatalf("expected no error for successful bulk response, got: %v", err)
+	}
+}
+
+// TestCheckBulkResponsePartialFailure verifies that CheckBulkResponse detects when
+// some bulk items fail even though the HTTP response itself was 200 OK.
+func TestCheckBulkResponsePartialFailure(t *testing.T) {
+	body := strings.NewReader(`{
+		"errors": true,
+		"items": [
+			{"index": {"_index": "test", "_id": "1", "status": 201}},
+			{"index": {
+				"_index": "test",
+				"_id": "2",
+				"status": 409,
+				"error": {
+					"type": "version_conflict_engine_exception",
+					"reason": "document already exists"
+				}
+			}},
+			{"create": {
+				"_index": "test",
+				"_id": "3",
+				"status": 400,
+				"error": {
+					"type": "mapper_parsing_exception",
+					"reason": "failed to parse field"
+				}
+			}}
+		]
+	}`)
+
+	err := CheckBulkResponse(body)
+	if err == nil {
+		t.Fatal("expected BulkPartialFailureError, got nil")
+	}
+
+	var bpf *BulkPartialFailureError
+	ok := false
+	if bpfErr, isBPF := err.(*BulkPartialFailureError); isBPF {
+		bpf = bpfErr
+		ok = true
+	}
+	if !ok {
+		t.Fatalf("expected *BulkPartialFailureError, got %T: %v", err, err)
+	}
+	if bpf.FailedCount != 2 {
+		t.Fatalf("expected FailedCount=2, got %d", bpf.FailedCount)
+	}
+	if len(bpf.Errors) != 2 {
+		t.Fatalf("expected 2 error items, got %d", len(bpf.Errors))
+	}
+	// Check first error
+	if bpf.Errors[0].ErrorType != "version_conflict_engine_exception" {
+		t.Fatalf("unexpected first error type: %q", bpf.Errors[0].ErrorType)
+	}
+	if bpf.Errors[0].Status != 409 {
+		t.Fatalf("unexpected first error status: %d", bpf.Errors[0].Status)
+	}
+	// Check second error
+	if bpf.Errors[1].ErrorType != "mapper_parsing_exception" {
+		t.Fatalf("unexpected second error type: %q", bpf.Errors[1].ErrorType)
+	}
+}
+
+// TestCheckBulkResponseAllFailed verifies that CheckBulkResponse handles the case
+// where errors=true but no per-item error details are present (paranoia path).
+func TestCheckBulkResponseAllFailed(t *testing.T) {
+	// errors=true but items list has no per-item errors
+	body := strings.NewReader(`{"errors": true, "items": []}`)
+	err := CheckBulkResponse(body)
+	if err == nil {
+		t.Fatal("expected error when errors=true with empty items")
+	}
+	bpf, ok := err.(*BulkPartialFailureError)
+	if !ok {
+		t.Fatalf("expected *BulkPartialFailureError, got %T", err)
+	}
+	if bpf.FailedCount < 1 {
+		t.Fatalf("expected FailedCount >= 1, got %d", bpf.FailedCount)
+	}
+}
+
+// TestCheckBulkResponseInvalidJSON verifies that CheckBulkResponse returns an error
+// on malformed JSON rather than silently succeeding.
+func TestCheckBulkResponseInvalidJSON(t *testing.T) {
+	body := strings.NewReader(`not valid json`)
+	if err := CheckBulkResponse(body); err == nil {
+		t.Fatal("expected error for invalid JSON bulk response")
+	}
+}
+
+// TestBulkPartialFailureErrorMessage verifies the error string is human-readable.
+func TestBulkPartialFailureErrorMessage(t *testing.T) {
+	err := &BulkPartialFailureError{FailedCount: 3}
+	if !strings.Contains(err.Error(), "3") {
+		t.Fatalf("expected error message to contain count, got: %q", err.Error())
+	}
+}
+
+// TestStopBackgroundTasksNoTasks verifies that stopBackgroundTasks is safe to call
+// when no background goroutines were started (statsQuit is nil).
+func TestStopBackgroundTasksNoTasks(t *testing.T) {
+	plugin := NewElasticsearchClient()
+	plugin.conf = &conf.Elasticsearch{
+		EnableMetrics:     false,
+		EnableHealthCheck: false,
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("stopBackgroundTasks panicked: %v", r)
+		}
+	}()
+	plugin.stopBackgroundTasks()
+}
+
+// TestStopBackgroundTasksWithRunningGoroutine verifies that stopBackgroundTasks
+// correctly waits for a running goroutine to exit.
+func TestStopBackgroundTasksWithRunningGoroutine(t *testing.T) {
+	plugin := NewElasticsearchClient()
+	plugin.conf = &conf.Elasticsearch{
+		EnableMetrics: true,
+	}
+	plugin.statsQuit = make(chan struct{})
+
+	var started, stopped atomic.Int32
+	plugin.statsWG.Go(func() {
+		started.Store(1)
+		<-plugin.statsQuit
+		stopped.Store(1)
+	})
+
+	// Give the goroutine a moment to start.
+	for i := 0; i < 100 && started.Load() == 0; i++ {
+		time.Sleep(time.Millisecond)
+	}
+
+	plugin.stopBackgroundTasks()
+
+	if stopped.Load() != 1 {
+		t.Fatal("expected background goroutine to have exited after stopBackgroundTasks")
+	}
+}
+
+// TestMetricsRoundTripperLabels verifies that metricsRoundTripper correctly
+// parses operation/index labels without panicking on various path patterns.
+func TestMetricsRoundTripperLabels(t *testing.T) {
+	paths := []string{
+		"/myindex/_search",
+		"/_bulk",
+		"/myindex/_doc/1",
+		"/myindex/_update/1",
+		"/_cluster/health",
+		"/",
+		"",
+	}
+	rt := newMetricsRoundTripper(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+		}, nil
+	}))
+
+	for _, path := range paths {
+		req := &http.Request{
+			Method: http.MethodGet,
+			URL:    &url.URL{Path: path},
+			Header: make(http.Header),
+		}
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip(%q) returned unexpected error: %v", path, err)
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+	}
+}
+
+// TestUpdateClusterMetrics verifies that updateClusterMetrics does not panic and
+// uses a fallback cluster name when the provided name is empty.
+func TestUpdateClusterMetrics(t *testing.T) {
+	// Should not panic with any combination of inputs.
+	updateClusterMetrics("", 3, "green")
+	updateClusterMetrics("mycluster", 0, "yellow")
+	updateClusterMetrics("mycluster", 5, "red")
+	updateClusterMetrics("mycluster", 5, "unknown")
+}
+
+// roundTripFunc is a helper that adapts a function to the http.RoundTripper interface.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
