@@ -1,3 +1,7 @@
+// Package elasticsearch provides an Elasticsearch client plugin for the Lynx framework.
+// It wraps the official Go Elasticsearch client with production-grade connection management,
+// index template bootstrapping, configurable retry/timeout policies, and Prometheus metrics
+// for indexing, search, and bulk operations.
 package elasticsearch
 
 import (
@@ -211,10 +215,7 @@ func (p *PlugElasticsearch) startMetricsCollection() {
 	if p.statsQuit == nil {
 		p.statsQuit = make(chan struct{})
 	}
-	p.statsWG.Add(1)
-
-	go func() {
-		defer p.statsWG.Done()
+	p.statsWG.Go(func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
@@ -226,7 +227,7 @@ func (p *PlugElasticsearch) startMetricsCollection() {
 				return
 			}
 		}
-	}()
+	})
 }
 
 // stopBackgroundTasks stops metrics collection and health check goroutines with timeout
@@ -307,9 +308,7 @@ func (p *PlugElasticsearch) startHealthCheck() {
 		p.statsQuit = make(chan struct{})
 	}
 
-	p.statsWG.Add(1)
-	go func() {
-		defer p.statsWG.Done()
+	p.statsWG.Go(func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -323,7 +322,7 @@ func (p *PlugElasticsearch) startHealthCheck() {
 				return
 			}
 		}
-	}()
+	})
 }
 
 // closeStatsQuitOnce closes statsQuit only once in a thread-safe way
