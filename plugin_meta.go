@@ -6,7 +6,7 @@ import (
 
 const (
 	pluginName        = "elasticsearch.client"
-	pluginVersion     = "v1.6.1"
+	pluginVersion     = "v1.6.3"
 	pluginDescription = "elasticsearch plugin for lynx framework"
 	confPrefix        = "lynx.elasticsearch"
 )
