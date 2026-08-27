@@ -131,11 +131,15 @@ const (
 	maxRetriesBound            int32 = 10
 )
 
-// Initialize Elasticsearch plugin
-func (p *PlugElasticsearch) Initialize(plugin plugins.Plugin, rt plugins.Runtime) error {
-	err := p.BasePlugin.Initialize(plugin, rt)
-	if err != nil {
-		log.Error(err)
+// InitializeResourcesContext is the context-aware resource-initialization hook.
+// It parses configuration, builds the Elasticsearch client, and launches the
+// background metrics/health goroutines. ctx is checked before any work and again
+// before goroutines are launched, so a cancelled initialization leaves no workers.
+func (p *PlugElasticsearch) InitializeResourcesContext(ctx context.Context, rt plugins.Runtime) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("elasticsearch initialize canceled before execution: %w", err)
+	}
+	if err := p.BasePlugin.InitializeResources(rt); err != nil {
 		return err
 	}
 
@@ -155,6 +159,10 @@ func (p *PlugElasticsearch) Initialize(plugin plugins.Plugin, rt plugins.Runtime
 		return fmt.Errorf("failed to create elasticsearch client: %w", err)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("elasticsearch initialize canceled before starting background tasks: %w", err)
+	}
+
 	// Start metrics collection
 	if p.conf.EnableMetrics {
 		p.startMetricsCollection()
@@ -169,16 +177,19 @@ func (p *PlugElasticsearch) Initialize(plugin plugins.Plugin, rt plugins.Runtime
 	return nil
 }
 
-// Start Elasticsearch plugin
-func (p *PlugElasticsearch) Start(plugin plugins.Plugin) error {
-	err := p.BasePlugin.Start(plugin)
-	if err != nil {
-		log.Error(err)
-		return err
-	}
+// InitializeResources is the legacy (non-context) resource-initialization hook.
+func (p *PlugElasticsearch) InitializeResources(rt plugins.Runtime) error {
+	return p.InitializeResourcesContext(context.Background(), rt)
+}
 
-	// Test connection
-	if err := p.testConnection(); err != nil {
+// StartupTasksContext is the context-aware startup hook: it verifies
+// connectivity with a ping that observes ctx. The core BasePlugin drives the
+// lifecycle state machine (status transitions, events, health check).
+func (p *PlugElasticsearch) StartupTasksContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("elasticsearch startup canceled before execution: %w", err)
+	}
+	if err := p.testConnectionContext(ctx); err != nil {
 		return fmt.Errorf("failed to test elasticsearch connection: %w", err)
 	}
 
@@ -186,19 +197,28 @@ func (p *PlugElasticsearch) Start(plugin plugins.Plugin) error {
 	return nil
 }
 
-// Stop Elasticsearch plugin
-func (p *PlugElasticsearch) Stop(plugin plugins.Plugin) error {
-	err := p.BasePlugin.Stop(plugin)
-	if err != nil {
-		log.Error(err)
+// StartupTasks is the legacy (non-context) startup hook.
+func (p *PlugElasticsearch) StartupTasks() error {
+	return p.StartupTasksContext(context.Background())
+}
+
+// CleanupTasksContext is the context-aware cleanup hook: background tasks are
+// signalled to stop and the wait for them is bounded by ctx.
+func (p *PlugElasticsearch) CleanupTasksContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("elasticsearch cleanup canceled before execution: %w", err)
+	}
+	if err := p.stopBackgroundTasksContext(ctx); err != nil {
 		return err
 	}
 
-	// Stop background tasks (metrics + health check) with unified timeout
-	p.stopBackgroundTasks()
-
 	log.Info("elasticsearch plugin stopped successfully")
 	return nil
+}
+
+// CleanupTasks is the legacy (non-context) cleanup hook.
+func (p *PlugElasticsearch) CleanupTasks() error {
+	return p.CleanupTasksContext(context.Background())
 }
 
 // parseConfig Parse configuration
@@ -287,9 +307,18 @@ func (p *PlugElasticsearch) createClient() error {
 	return nil
 }
 
-// testConnection Test connection
+// testConnection pings Elasticsearch with the default 10s bound.
 func (p *PlugElasticsearch) testConnection() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return p.testConnectionContext(context.Background())
+}
+
+// testConnectionContext pings Elasticsearch. The request observes ctx and is
+// additionally bounded by a 10s timeout.
+func (p *PlugElasticsearch) testConnectionContext(ctx context.Context) error {
+	if p.client == nil {
+		return fmt.Errorf("elasticsearch client is not initialized")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	// Send ping request
@@ -343,9 +372,21 @@ func (p *PlugElasticsearch) startMetricsCollection() {
 // background goroutines (metrics collection, health check) to exit.  It is safe to call
 // when no background tasks were started.
 func (p *PlugElasticsearch) stopBackgroundTasks() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.stopBackgroundTasksContext(ctx); err != nil {
+		log.Warnf("timeout waiting for elasticsearch background tasks to stop: %v", err)
+	}
+}
+
+// stopBackgroundTasksContext signals the shared quit channel and waits for all
+// background goroutines to exit, or until ctx is done. It returns ctx's error when
+// the wait was abandoned; the goroutines still exit on their own once they observe
+// the closed quit channel.
+func (p *PlugElasticsearch) stopBackgroundTasksContext(ctx context.Context) error {
 	if p.statsQuit == nil {
 		// No background goroutines were ever launched.
-		return
+		return nil
 	}
 	p.closeStatsQuitOnce()
 	done := make(chan struct{})
@@ -356,8 +397,15 @@ func (p *PlugElasticsearch) stopBackgroundTasks() {
 	select {
 	case <-done:
 		log.Infof("elasticsearch background tasks stopped successfully")
-	case <-time.After(10 * time.Second):
-		log.Warnf("timeout waiting for elasticsearch background tasks to stop")
+		return nil
+	case <-ctx.Done():
+		select {
+		case <-done:
+			log.Infof("elasticsearch background tasks stopped successfully")
+			return nil
+		default:
+			return fmt.Errorf("elasticsearch cleanup canceled while waiting for background tasks: %w", ctx.Err())
+		}
 	}
 }
 
